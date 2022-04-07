@@ -1,11 +1,27 @@
+# 0.0.0.1 | 0 | stable
+# 0.0.1-alpha1 | 1 | alpha
+# 0.0.1-alpha2 | 2 | alpha
+# 0.0.1-beta1 | 3 | beta
+# 0.0.1-beta2 | 4 | beta
+# 0.0.1-beta3 | 5 | beta
+# 0.0.1 | 6 | stable
+# 0.0.2-alpha1 | 7 | alpha
+# 0.0.2-alpha2 | 8 | alpha
+# 0.0.2-beta1 | 9 | beta
+# 0.0.2 | 10 | stable
+# 0.0.3-alpha1 | 11 | alpha
+
+
 import os
 
 from flask import Flask, request, jsonify
 from werkzeug.exceptions import HTTPException
 
+from db import add_version, get_version, get_latest_version
+from util import store_version_asset
+
 SERVER_URL = os.environ['SERVER_URL']
 UPLOAD_TOKEN = os.environ['UPLOAD_TOKEN']
-ASSETS_DIR = 'static'
 
 
 def handle_http_error(e):
@@ -17,17 +33,9 @@ app.register_error_handler(HTTPException, handle_http_error)
 
 
 @app.route('/upload/<platform>/<channel>/<version>', methods=['POST'])
-def upload_version(platform, version, channel):
+def upload_version(platform, channel, version):
     if request.headers.get("Authorization") != UPLOAD_TOKEN:
-        return {}, 401
-
-    path_to_platform = "{}/{}".format(ASSETS_DIR, platform)
-    path_to_channel = "{}/{}".format(path_to_platform, channel)
-    path_to_version = "{}/{}".format(path_to_channel, version)
-
-    for path in [ASSETS_DIR, path_to_platform, path_to_channel, path_to_version]:
-        if not os.path.exists(path):
-            os.mkdir(path)
+        return jsonify(error="Not authorized"), 401
 
     if 'file' not in request.files:
         return jsonify(error="No file attached"), 400
@@ -39,53 +47,45 @@ def upload_version(platform, version, channel):
         return jsonify(error="No file attached"), 400
 
     if asset_ext not in ['.zip', '.exe', '.deb']:
-        return jsonify(error="Unsupported file extension. User: `.zip`, `.exe`, `.deb`"), 400
+        return jsonify(error="Unsupported file extension. Allowed: `.zip`, `.exe`, `.deb`"), 400
 
-    asset_filename = "{}-{}{}".format(platform, version, asset_ext)
-    asset_path = os.path.join(path_to_version, asset_filename)
-    asset.save(asset_path)
+    version_path = store_version_asset(platform, channel, version, asset, asset_ext)
 
+    add_version(platform, channel, version, version_path)
     return jsonify(platform=platform, version=version, channel=channel)
 
 
-@app.route('/update/<platform>/<channel>/<version>', methods=['GET'])
-def get_version(platform, version, channel):
-    path_to_channel = "{}/{}/{}".format(ASSETS_DIR, platform, channel)
+@app.route('/update/<platform>/<channel>/latest', methods=['GET'])
+def get_channel_latest_version(platform, channel):
+    latest_version = get_latest_version(platform, channel)
 
-    if not os.path.exists(path_to_channel):
+    if not latest_version:
         return {}, 204
 
-    current_version = parse_version(version, channel)
-    version_paths = os.listdir(path_to_channel)
-    last_version_path = None
+    version_path = latest_version["asset"]["version_path"]
+    return jsonify(url=f"{SERVER_URL}/{version_path}")
 
-    for version_path in version_paths:
-        platform_version = parse_version(version_path, channel)
 
-        if platform_version > current_version:
-            last_version_path = version_path
+@app.route('/update/<platform>/<channel>/<version>')
+def check_for_update(platform, channel, version):
+    latest_version = get_latest_version(platform, channel)
 
-    if not last_version_path:
+    if not latest_version:
         return {}, 204
 
-    release_path = "{}/{}".format(path_to_channel, last_version_path)
-    release_path_content = os.listdir(release_path)
-    if len(last_version_path) == 0:
-        return {}, 204
+    latest_version_path = latest_version["asset"]["version_path"]
+    current_version = get_version(version)
 
-    release = "{}/{}".format(release_path, release_path_content[0])
-    if not os.path.isfile(release):
-        return {}, 204
+    if not current_version:
+        return jsonify(url=f"{SERVER_URL}/{latest_version_path}")
 
-    return jsonify(url="{}/{}".format(SERVER_URL, release))
+    current_version_code = int(current_version["version_code"])
+    latest_version_code = int(latest_version["version"]["version_code"])
 
+    if current_version_code < latest_version_code:
+        return jsonify(url=f"{SERVER_URL}/{latest_version_path}")
 
-def parse_version(version, channel):
-    parsed_version = version \
-        .replace(".", "") \
-        .replace("-{}".format(channel), ".")
-
-    return float(parsed_version)
+    return {}, 204
 
 
 if __name__ == '__main__':
